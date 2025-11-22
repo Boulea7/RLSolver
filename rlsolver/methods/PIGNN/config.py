@@ -1,5 +1,5 @@
 import torch as th
-from typing import Iterable, Optional
+from typing import Iterable, Optional, List
 from enum import Enum, unique
 import os
 
@@ -68,6 +68,13 @@ LAMBDA_BALANCE: float = 0.05  # Color balance regularization coefficient
 IN_DIM: int = 16  # Feature dimension for graph coloring
 TEMPERATURE: float = 1.2  # Temperature sampling parameter for decoding
 TRIALS: int = 10  # Number of sampling trials for temperature sampling
+
+# Dataset-driven inference parameters
+GRAPH_COLORING_INFERENCE_USE_DATASET: bool = False
+GRAPH_COLORING_INFERENCE_DATA_DIR: str = os.path.join(_PROJECT_ROOT, "rlsolver", "data")
+GRAPH_COLORING_INFERENCE_PREFIXES: List[str] = []
+GRAPH_COLORING_INFERENCE_WRITE_RESULTS: bool = True
+GRAPH_COLORING_INFERENCE_ALG_NAME: str = "PIGNN_GraphColoring"
 
 
 # ================== Model Naming and Management ==================

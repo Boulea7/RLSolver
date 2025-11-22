@@ -18,9 +18,13 @@ from typing import Optional, List, Tuple
 # Use new unified environment structure
 from rlsolver.methods.PIGNN.data import DRegDataset
 from rlsolver.methods.PIGNN.model import PIGNN
-from rlsolver.methods.PIGNN.util import eval_graph_coloring
+from rlsolver.methods.PIGNN.util import (
+    eval_graph_coloring,
+    load_graph_coloring_graphs_from_directory,
+)
 from rlsolver.methods.PIGNN.config import *
 from rlsolver.methods.config import Problem
+from rlsolver.methods.util_write_read_result import write_graph_result
 
 
 def temperature_sampling_decode(pred, edge_index, num_colors, temperature=TEMPERATURE, trials=TRIALS):
@@ -153,7 +157,7 @@ def create_inference_dataloader(num_nodes: int, num_graphs: int = 100) -> DataLo
     return dataloader
 
 
-def run_inference(model: PIGNN, dataloader: DataLoader, device: torch.device) -> tuple:
+def run_loader_inference(model: PIGNN, dataloader: DataLoader, device: torch.device) -> tuple:
     """
     Run inference on the given dataloader using the loaded model.
 
@@ -190,6 +194,76 @@ def run_inference(model: PIGNN, dataloader: DataLoader, device: torch.device) ->
                 all_predictions.append(colors.detach().cpu())
 
     return energies, approximation_ratios, all_predictions
+
+
+def infer_single_graph(model: PIGNN, graph_data: Data, device: torch.device):
+    data = graph_data.to(device)
+    pred = model(data.x, data.edge_index)
+    colors, violations, used_colors = temperature_sampling_decode(
+        pred, data.edge_index, NUM_COLORS, TEMPERATURE, TRIALS
+    )
+    energy, approx_ratio = eval_graph_coloring(
+        data.edge_index, colors, NUM_COLORS, data.num_nodes
+    )
+    return colors, energy, approx_ratio, violations, used_colors
+
+
+def run_directory_inference(model: PIGNN, device: torch.device):
+    """
+    Run inference over all graph files found in the configured directory.
+
+    Returns:
+        energies, approximation_ratios, predictions lists for downstream stats.
+    """
+    try:
+        graph_data_list = load_graph_coloring_graphs_from_directory(
+            GRAPH_COLORING_INFERENCE_DATA_DIR,
+            GRAPH_COLORING_INFERENCE_PREFIXES or None,
+            IN_DIM,
+        )
+    except FileNotFoundError as exc:
+        print(f"[PIGNN] {exc}")
+        return [], [], []
+
+    if not graph_data_list:
+        print("[PIGNN] No graph coloring instances found for inference.")
+        return [], [], []
+
+    energies, ratios, predictions = [], [], []
+    for graph_data in graph_data_list:
+        start_time = time()
+        colors, energy, ratio, violations, used_colors = infer_single_graph(
+            model, graph_data, device
+        )
+        run_duration = time() - start_time
+        energies.append(energy.item())
+        ratios.append(ratio.item())
+        color_solution = colors.detach().cpu().numpy().astype(int)
+        predictions.append(torch.from_numpy(color_solution))
+
+        if GRAPH_COLORING_INFERENCE_WRITE_RESULTS:
+            info = {
+                "approx_ratio": float(ratio.item()),
+                "violations": float(violations),
+                "used_colors": int(used_colors),
+            }
+            write_graph_result(
+                obj=float(energy.item()),
+                running_duration=int(round(run_duration)),
+                num_nodes=graph_data.num_nodes,
+                alg_name=GRAPH_COLORING_INFERENCE_ALG_NAME,
+                solution=color_solution,
+                filename=graph_data.file_path,
+                plus1=True,
+                info_dict=info,
+            )
+
+        print(
+            f"[PIGNN] {graph_data.graph_name}: energy={energy.item():.4f}, "
+            f"ratio={ratio.item():.4f}, time={run_duration:.2f}s"
+        )
+
+    return energies, ratios, predictions
 
 
 def save_results(energies: List[float], approximation_ratios: List[float],
@@ -273,28 +347,34 @@ def run():
     model = load_model(model_path, device)
 
     # Determine inference parameters
-    if isinstance(INFERENCE_NUM_NODES, list):
-        print(f"Running inference on multiple node sizes: {INFERENCE_NUM_NODES}")
-        all_energies, all_ratios = [], []
-
-        for num_nodes in INFERENCE_NUM_NODES:
-            print(f"\nProcessing {num_nodes} nodes...")
-            dataloader = create_inference_dataloader(num_nodes)
-            energies, ratios, _ = run_inference(model, dataloader, device)
-
-            all_energies.extend(energies)
-            all_ratios.extend(ratios)
-
-            print(f"Results for {num_nodes} nodes:")
-            print(f"  Average energy: {np.mean(energies):.4f}")
-            print(f"  Average approximation ratio: {np.mean(ratios):.4f}")
-
-        energies = all_energies
-        approximation_ratios = all_ratios
+    if GRAPH_COLORING_INFERENCE_USE_DATASET:
+        energies, approximation_ratios, predictions = run_directory_inference(model, device)
+        if not energies:
+            return
     else:
-        print(f"Running inference on {INFERENCE_NUM_NODES} nodes...")
-        dataloader = create_inference_dataloader(INFERENCE_NUM_NODES)
-        energies, approximation_ratios, predictions = run_inference(model, dataloader, device)
+        if isinstance(INFERENCE_NUM_NODES, list):
+            print(f"Running inference on multiple node sizes: {INFERENCE_NUM_NODES}")
+            all_energies, all_ratios = [], []
+
+            for num_nodes in INFERENCE_NUM_NODES:
+                print(f"\nProcessing {num_nodes} nodes...")
+                dataloader = create_inference_dataloader(num_nodes)
+                energies, ratios, _ = run_loader_inference(model, dataloader, device)
+
+                all_energies.extend(energies)
+                all_ratios.extend(ratios)
+
+                print(f"Results for {num_nodes} nodes:")
+                print(f"  Average energy: {np.mean(energies):.4f}")
+                print(f"  Average approximation ratio: {np.mean(ratios):.4f}")
+
+            energies = all_energies
+            approximation_ratios = all_ratios
+            predictions = []
+        else:
+            print(f"Running inference on {INFERENCE_NUM_NODES} nodes...")
+            dataloader = create_inference_dataloader(INFERENCE_NUM_NODES)
+            energies, approximation_ratios, predictions = run_loader_inference(model, dataloader, device)
 
     # Final results
     print("\n" + "=" * 60)
